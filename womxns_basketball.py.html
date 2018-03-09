@@ -1,0 +1,245 @@
+
+# coding: utf-8
+
+# In[1]:
+
+import json
+import re
+import requests
+import scrapy
+import pandas as pd
+
+
+# In[2]:
+
+#access permission
+headers = {'User-Agent': 'UNC Journo Class'}
+
+#stores url page information in sel
+resp = requests.get('http://goheels.com/roster.aspx?path=wbball&print=true', headers=headers)
+body_str = resp.content.decode('utf-8')
+sel = scrapy.Selector(text=body_str)
+
+
+# In[3]:
+
+table = sel.css('table')[0]
+table
+
+
+# In[4]:
+
+#extracts the string value of the table headers of the table of players
+cols = table.css('th').xpath('string()').extract()
+cols
+
+
+# In[5]:
+
+#stores table rows into rows
+rows = table.css('tr')[1:]
+
+
+# In[6]:
+
+players = []
+
+#goes through every row and stores its link 
+for r in rows:
+    data = {}
+    for i, d in enumerate(r.css('td')):
+        a = d.css('a')
+        if a:
+            t = a.xpath('text()').extract()[0]
+            data['href'] = a.xpath('@href').extract()[0]
+        else:
+            t = d.xpath('text()').extract()[0]
+        data[cols[i]] = t
+    players.append(data)
+
+
+# In[7]:
+
+players
+
+
+# In[8]:
+
+def getBio(player):
+    player_url = 'http://goheels.com' + player['href']
+    #print('bio', player_url)
+    resp = requests.get(player_url, headers=headers)
+    player_txt = resp.content.decode('utf-8')
+    sel = scrapy.Selector(text=player_txt)
+    player['sel'] = sel
+    player['bio'] = sel.css('#sidearm-roster-player-bio').xpath('string()').extract()[0]
+    player['img'] = sel.css('.sidearm-roster-player-image img').xpath('@src').extract()[0]
+
+
+# In[9]:
+
+js_obj_rx = re.compile(r'.*?responsive-roster-bio\.ashx.*?(?P<obj>{.*?})')
+
+def getStats(player):
+    text = player['sel'].xpath('string()').extract()[0]
+    parts = text.split('$.getJSON("/services/')[1:]
+    captured = js_obj_rx.findall(''.join(parts))
+    clean_objs = []
+    for obj_str in captured:
+        if 'stats' not in obj_str:
+            continue
+
+        obj_str = obj_str.replace('{', '').replace('}', '')
+        obj_str = obj_str.replace("'", '').replace('"', '')
+        obj_pairs = obj_str.split(',')
+        obj_pairs = [x.split(":") for x in obj_pairs]
+        clean_pairs = []
+        for pair in obj_pairs:
+            clean_pairs.append(['"{}"'.format(p.strip()) for p in pair])
+        colonized = [":".join(p) for p in clean_pairs]
+        commas = ','.join(colonized)
+        json_str = "{" + commas + "}"
+        clean_objs.append(json.loads(json_str))
+    
+    player['stats_url'] = stats_url = (
+        "http://goheels.com/services/responsive-roster-bio.ashx?"
+        "type={type}&rp_id={rp_id}&path={path}&year={year}"
+        "&player_id={player_id}"
+    ).format(**clean_objs[0])
+    
+    #print('stats', stats_url)
+    
+    #PARSE AND CLEAN STATS DATA
+    resp = requests.get(stats_url, headers=headers)
+    stats_str = resp.content.decode('utf-8')
+    sel = scrapy.Selector(text=stats_str)
+    if sel.css('table').xpath('string()').extract() != []:
+        table = sel.css('table')[0]
+        caption = table.css('caption').xpath('string()').extract()
+        #print(caption)
+        if caption != ['Career Statistics']:
+            table = sel.css('table')[1]
+    
+        #career statistics
+        cols = table.css('thead').css('tr').css('th')[1:].xpath('string()').extract()
+        #print(cols)
+        
+        list_stats = []
+        #get total career statistics
+        row_data = table.css('tfoot')[0].css('tr')[0].css('td').xpath('string()').extract()
+        #print(row_data)
+        total_cs = list(zip(cols, row_data))
+        stat_item_1 = {"Total Career Statistics" : total_cs}
+        list_stats.append(stat_item_1)
+        
+        #get other seasons statistics
+        i = 0
+        for seasons in table.css('tbody')[0].css('tr').css('th').xpath('string()').extract():
+            row_data = table.css('tbody')[0].css('tr')[i].css('td').xpath('string()').extract()
+            season = row_data = table.css('tbody')[0].css('tr')[i].css('th').xpath('string()').extract()
+            i = i + 1
+            #print(season)
+            #print(row_data)
+            season_cs = list(zip(cols, row_data))
+            stat_item_2 = {str(season) : total_cs}
+            list_stats.append(stat_item_2)
+        
+        player['raw_stats'] = list_stats
+        
+#         for p in player['raw_stats']:
+#             print("hi")
+#             clean_pairs = []
+#             clean_p = str(p).replace("(", '').replace(")", '')
+#             clean_p = clean_p.replace("[", '{').replace("]", '}')
+#             print(clean_p[1])
+#             print(clean_p)
+
+
+# In[10]:
+
+for p in players:
+    getBio(p)
+    getStats(p)
+
+
+# In[11]:
+
+players[0]
+
+
+# In[12]:
+
+#formats for json file
+to_dump = [p.copy() for p in players]
+for p in to_dump:
+    p.pop('sel')
+with open('scraped_players.json', 'w') as f:
+    json.dump(to_dump, f)
+
+
+# In[13]:
+
+cat scraped_players.json | cut -c 1-100
+
+
+# In[14]:
+
+to_dump[0]
+
+
+# In[15]:
+
+df = pd.read_json("scraped_players.json")
+
+
+# In[16]:
+
+#displays chart from json file
+df
+
+
+# In[17]:
+
+df.columns
+
+
+# In[18]:
+
+df = df.set_index("Name")
+
+
+# In[19]:
+
+df.loc["Paris Kea"]
+
+
+# In[20]:
+
+#womxn's basketball team members grouped by year
+grouped = df.groupby("Yr.")
+type(grouped)
+grouped.groups
+
+
+# In[21]:
+
+players[0]['raw_stats'][1]
+
+
+# In[22]:
+
+#womxn's basketball team members grouped by position
+grouped = df.groupby("Pos.")
+type(grouped)
+grouped.groups
+
+
+# In[ ]:
+
+
+
+
+# In[ ]:
+
+
+
